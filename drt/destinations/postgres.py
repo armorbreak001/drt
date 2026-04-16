@@ -13,6 +13,14 @@ Example sync YAML:
       password_env: TARGET_PG_PASSWORD
       table: public.analytics_scores
       upsert_key: [id]
+      json_columns: [metadata, tags]  # optional: explicit JSON serialization
+
+JSON serialization behaviour:
+  - If ``json_columns`` is set, only the listed columns have their values
+    wrapped with ``psycopg2.extras.Json()``; all other columns pass through
+    as-is (including dict/list values).
+  - If ``json_columns`` is ``None`` (default), the legacy heuristic applies:
+    dict and list values are auto-wrapped for any column.
 """
 
 from __future__ import annotations
@@ -29,6 +37,10 @@ from drt.destinations.row_errors import RowError
 class PostgresDestination:
     """Upsert records into a PostgreSQL table."""
 
+    def __init__(self) -> None:
+        self._json_columns: set[str] | None = None
+        self._json_wrapper: Any = None  # cached psycopg2.extras.Json
+
     def load(
         self,
         records: list[dict[str, Any]],
@@ -38,6 +50,9 @@ class PostgresDestination:
         assert isinstance(config, PostgresDestinationConfig)
         if not records:
             return SyncResult()
+
+        # Cache json_columns set for the lifetime of this load call
+        self._json_columns = set(config.json_columns) if config.json_columns else None
 
         conn = self._connect(config)
         result = SyncResult()
@@ -51,7 +66,10 @@ class PostgresDestination:
 
             for i, record in enumerate(records):
                 try:
-                    values = [record.get(c) for c in columns]
+                    values = [
+                        self._serialize_value(record.get(c), c)
+                        for c in columns
+                    ]
                     cur.execute(sql, values)
                     result.success += 1
                 except Exception as e:
@@ -78,6 +96,42 @@ class PostgresDestination:
             conn.close()
 
         return result
+
+    def _serialize_value(self, value: Any, column: str) -> Any:
+        """Prepare *value* for a parameterised INSERT.
+
+        When ``json_columns`` is configured:
+          - listed columns → wrapped with ``psycopg2.extras.Json()``
+          - other columns → passed through as-is
+
+        When ``json_columns`` is ``None`` (backward-compatible default):
+          - dict/list values → auto-wrapped with ``psycopg2.extras.Json()``
+          - everything else → passed through as-is
+        """
+        if value is None:
+            return None
+
+        # Import psycopg2.extras lazily but cache the reference on the
+        # class so repeated calls within the same load() don't re-import.
+        if self._json_wrapper is None:
+            try:
+                import psycopg2.extras as _extras  # type: ignore[import-untyped]
+
+                self._json_wrapper = _extras.Json
+            except ImportError:
+                # psycopg2 not installed — fall back to passthrough
+                return value
+
+        if self._json_columns is not None:
+            # Explicit mode: only serialize listed columns
+            if column in self._json_columns:
+                return self._json_wrapper(value)
+            return value
+        else:
+            # Heuristic mode: auto-serialize dict/list
+            if isinstance(value, (dict, list)):
+                return self._json_wrapper(value)
+            return value
 
     @staticmethod
     def _build_upsert_sql(

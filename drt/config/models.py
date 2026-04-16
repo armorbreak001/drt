@@ -206,6 +206,10 @@ class PostgresDestinationConfig(BaseModel):
     table: str  # e.g. "public.analytics_scores"
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
+    # Columns whose values should always be JSON-serialized. When set,
+    # only listed columns are serialized (dict/list passthrough otherwise).
+    # When None/empty, the default heuristic applies (dict/list auto-JSON).
+    json_columns: list[str] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
@@ -236,6 +240,10 @@ class MySQLDestinationConfig(BaseModel):
     table: str  # e.g. "interviewer_learning_profiles"
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
+    # Columns whose values should always be JSON-serialized. When set,
+    # only listed columns are serialized (dict/list passthrough otherwise).
+    # When None/empty, the default heuristic applies (dict/list auto-JSON).
+    json_columns: list[str] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
@@ -297,6 +305,10 @@ class ClickHouseDestinationConfig(BaseModel):
     # ReplacingMergeTree tables or apply upsert semantics from this field.
     upsert_key: list[str] | None = None
     secure: bool = False  # use HTTPS/TLS; set port explicitly for your deployment (commonly 8443)
+    # Columns whose values should always be JSON-serialized. When set,
+    # only listed columns are serialized (dict/list passthrough otherwise).
+    # When None/empty, the default heuristic applies (dict/list auto-JSON).
+    json_columns: list[str] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"

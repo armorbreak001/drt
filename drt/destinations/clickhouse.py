@@ -18,6 +18,13 @@ Example sync YAML:
       user_env: TARGET_CH_USER
       password_env: TARGET_CH_PASSWORD
       table: analytics_scores
+      json_columns: [metadata, tags]  # optional: explicit JSON serialization
+
+JSON serialization behaviour:
+  - If ``json_columns`` is set, only the listed columns have their values
+    serialized with ``json.dumps()``; all other columns pass through as-is.
+  - If ``json_columns`` is ``None`` (default), the legacy heuristic applies:
+    dict and list values are auto-serialized for any column.
 """
 
 from __future__ import annotations
@@ -34,6 +41,9 @@ from drt.destinations.row_errors import RowError
 class ClickHouseDestination:
     """Insert records into a ClickHouse table."""
 
+    def __init__(self) -> None:
+        self._json_columns: set[str] | None = None
+
     def load(
         self,
         records: list[dict[str, Any]],
@@ -44,6 +54,9 @@ class ClickHouseDestination:
         if not records:
             return SyncResult()
 
+        # Cache json_columns set for the lifetime of this load call
+        self._json_columns = set(config.json_columns) if config.json_columns else None
+
         client = self._connect(config)
         result = SyncResult()
 
@@ -53,7 +66,9 @@ class ClickHouseDestination:
             # TODO: batch insert with fallback to row-by-row on error
             for i, record in enumerate(records):
                 try:
-                    row = [[record.get(c) for c in columns]]
+                    row = [
+                        [self._serialize_value(record.get(c), c) for c in columns]
+                    ]
                     client.insert(config.table, row, column_names=columns)
                     result.success += 1
                 except Exception as e:
@@ -73,6 +88,29 @@ class ClickHouseDestination:
             client.close()
 
         return result
+
+    def _serialize_value(self, value: Any, column: str) -> Any:
+        """Prepare *value* for insertion.
+
+        When ``json_columns`` is configured:
+          - listed columns → serialized with ``json.dumps()``
+          - other columns → passed through as-is
+
+        When ``json_columns`` is ``None`` (backward-compatible default):
+          - dict/list values → auto-serialized with ``json.dumps()``
+          - everything else → passed through as-is
+        """
+        if value is None:
+            return None
+
+        if self._json_columns is not None:
+            if column in self._json_columns:
+                return json.dumps(value, ensure_ascii=False)
+            return value
+        else:
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False)
+            return value
 
     @staticmethod
     def _connect(config: ClickHouseDestinationConfig) -> Any:

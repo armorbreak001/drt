@@ -13,6 +13,14 @@ Example sync YAML:
       password_env: TARGET_MYSQL_PASSWORD
       table: interviewer_learning_profiles
       upsert_key: [user_id, company_id]
+      json_columns: [metadata, tags]  # optional: explicit JSON serialization
+
+JSON serialization behaviour:
+  - If ``json_columns`` is set, only the listed columns have their values
+    serialized with ``json.dumps()``; all other columns pass through as-is
+    (including dict/list values).
+  - If ``json_columns`` is ``None`` (default), the legacy heuristic applies:
+    dict and list values are auto-serialized for any column.
 """
 
 from __future__ import annotations
@@ -26,16 +34,30 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
 
-def _serialize_value(value: Any) -> Any:
-    """Serialize dict/list values to JSON strings for pymysql.
+def _serialize_value(value: Any, column: str, json_columns: set[str] | None) -> Any:
+    """Serialize values for pymysql parameter binding.
 
-    pymysql does not auto-serialize complex Python types, so values
-    bound for JSON columns (common when sourcing from BigQuery) must
-    be converted to strings before execute().
+    When *json_columns* is configured (not ``None``):
+      - listed columns → ``json.dumps()`` regardless of value type
+      - other columns → passed through as-is
+
+    When *json_columns* is ``None`` (backward-compatible default):
+      - dict/list values → auto-serialized with ``json.dumps()``
+      - everything else → passed through as-is
     """
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return value
+    if value is None:
+        return None
+
+    if json_columns is not None:
+        # Explicit mode: only serialize listed columns
+        if column in json_columns:
+            return json.dumps(value, ensure_ascii=False)
+        return value
+    else:
+        # Heuristic mode: auto-serialize dict/list
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return value
 
 
 class MySQLDestination:
@@ -58,12 +80,16 @@ class MySQLDestination:
             cur = conn.cursor()
             columns = list(records[0].keys())
             update_cols = [c for c in columns if c not in config.upsert_key]
+            json_cols = set(config.json_columns) if config.json_columns else None
 
             sql = self._build_upsert_sql(config.table, columns, update_cols)
 
             for i, record in enumerate(records):
                 try:
-                    values = [_serialize_value(record.get(c)) for c in columns]
+                    values = [
+                        _serialize_value(record.get(c), c, json_cols)
+                        for c in columns
+                    ]
                     cur.execute(sql, values)
                     result.success += 1
                 except Exception as e:
